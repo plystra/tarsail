@@ -608,9 +608,6 @@ Recommended repository layout:
 │   ├── remote/
 │   ├── release/
 │   └── ui/
-├── docs/
-├── guardrails/
-├── AGENTS.md
 ├── README.md
 ├── go.mod
 └── go.sum
