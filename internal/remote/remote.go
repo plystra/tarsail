@@ -120,7 +120,7 @@ func (c Client) Upload(ctx context.Context, localPath, bundleName string) error 
 		"-o", "BatchMode=yes",
 		"-o", "ConnectTimeout=10",
 		localPath,
-		c.address()+":"+ShellQuote(remotePath),
+		c.scpDestination(remotePath),
 	)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -132,6 +132,10 @@ func (c Client) Upload(ctx context.Context, localPath, bundleName string) error 
 		return fmt.Errorf("[remote:upload] Could not upload bundle to %s:%s.\n\nDetails:\n  %s", c.address(), remotePath, strings.ReplaceAll(detail, "\n", "\n  "))
 	}
 	return nil
+}
+
+func (c Client) scpDestination(remotePath string) string {
+	return c.address() + ":" + remotePath
 }
 
 func (c Client) PrepareRelease(ctx context.Context, releaseID, bundleName string) error {
