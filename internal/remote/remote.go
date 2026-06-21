@@ -20,9 +20,15 @@ type Client struct {
 	Project        string
 	ComposeEnvFile string
 	Secrets        []config.SecretFile
+	Auth           Auth
 	Stdout         io.Writer
 	Stderr         io.Writer
 	Verbose        bool
+}
+
+type Auth struct {
+	IdentityFile string
+	Password     string
 }
 
 func ShellQuote(value string) string {
@@ -37,16 +43,25 @@ func (c Client) address() string {
 }
 
 func (c Client) sshArgs(remoteCommand string) []string {
-	return []string{
+	args := []string{
 		"-p", strconv.Itoa(c.Target.Port),
+	}
+	if c.Auth.IdentityFile != "" {
+		args = append(args, "-i", c.Auth.IdentityFile)
+	}
+	args = append(args,
 		"-o", "BatchMode=yes",
 		"-o", "ConnectTimeout=10",
 		c.address(),
 		remoteCommand,
-	}
+	)
+	return args
 }
 
 func (c Client) Capture(ctx context.Context, area, script string) (string, error) {
+	if c.Auth.Password != "" {
+		return c.passwordCapture(ctx, area, script)
+	}
 	cmd := exec.CommandContext(ctx, "ssh", c.sshArgs("sh -c "+ShellQuote(script))...)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -59,6 +74,9 @@ func (c Client) Capture(ctx context.Context, area, script string) (string, error
 }
 
 func (c Client) Stream(ctx context.Context, area, script string) error {
+	if c.Auth.Password != "" {
+		return c.passwordStream(ctx, area, script)
+	}
 	cmd := exec.CommandContext(ctx, "ssh", c.sshArgs("sh -c "+ShellQuote(script))...)
 	if c.Stdout != nil {
 		cmd.Stdout = ui.RedactingWriter{Writer: c.Stdout}
@@ -133,13 +151,10 @@ func (c Client) CheckCompose(ctx context.Context) error {
 
 func (c Client) Upload(ctx context.Context, localPath, bundleName string) error {
 	remotePath := path.Join(c.Target.Path, "incoming", bundleName)
-	cmd := exec.CommandContext(ctx, "scp",
-		"-P", strconv.Itoa(c.Target.Port),
-		"-o", "BatchMode=yes",
-		"-o", "ConnectTimeout=10",
-		localPath,
-		c.scpDestination(remotePath),
-	)
+	if c.Auth.Password != "" {
+		return c.passwordUpload(ctx, "remote:upload", localPath, remotePath)
+	}
+	cmd := exec.CommandContext(ctx, "scp", c.scpArgs(localPath, remotePath)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -152,19 +167,38 @@ func (c Client) Upload(ctx context.Context, localPath, bundleName string) error 
 	return nil
 }
 
+func (c Client) scpArgs(localPath, remotePath string) []string {
+	args := []string{
+		"-P", strconv.Itoa(c.Target.Port),
+	}
+	if c.Auth.IdentityFile != "" {
+		args = append(args, "-i", c.Auth.IdentityFile)
+	}
+	args = append(args,
+		"-o", "BatchMode=yes",
+		"-o", "ConnectTimeout=10",
+		localPath,
+		c.scpDestination(remotePath),
+	)
+	return args
+}
+
 func (c Client) UploadSecret(ctx context.Context, localPath string, secret config.SecretFile) error {
 	remotePath := path.Join(c.Target.Path, secret.Target)
 	remoteDir := path.Dir(remotePath)
 	if _, err := c.Capture(ctx, "remote:secret-dir", "mkdir -p "+ShellQuote(remoteDir)); err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, "scp",
-		"-P", strconv.Itoa(c.Target.Port),
-		"-o", "BatchMode=yes",
-		"-o", "ConnectTimeout=10",
-		localPath,
-		c.scpDestination(remotePath),
-	)
+	if c.Auth.Password != "" {
+		if err := c.passwordUpload(ctx, "remote:secret", localPath, remotePath); err != nil {
+			return err
+		}
+		if _, err := c.Capture(ctx, "remote:secret-mode", "chmod "+secret.Mode+" "+ShellQuote(remotePath)); err != nil {
+			return err
+		}
+		return nil
+	}
+	cmd := exec.CommandContext(ctx, "scp", c.scpArgs(localPath, remotePath)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

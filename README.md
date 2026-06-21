@@ -268,6 +268,24 @@ For documentation examples, use placeholder hosts such as `example.com` or docum
 tarsail doctor
 ```
 
+Use a specific SSH private key when your server is not using the default SSH
+identity:
+
+```bash
+tarsail --identity-file ~/.ssh/my-deploy-key doctor
+```
+
+If the server only allows password login, Tarsail can ask once and reuse that
+password for all remote commands and file uploads in the current run:
+
+```bash
+tarsail --ask-password deploy
+```
+
+Password mode uses your local `~/.ssh/known_hosts` for host-key verification.
+Connect once with your normal `ssh user@example.com` flow first if the host key
+is not already trusted.
+
 Tarsail checks:
 
 - local Docker availability
@@ -379,6 +397,17 @@ It does not delete Docker volumes, databases, bind mounts, or files outside the 
 | `tarsail logs` | Show remote Compose logs |
 | `tarsail rollback` | Roll back to the previous release |
 | `tarsail prune` | Delete old non-current releases |
+
+Global options:
+
+| Option | Description |
+|---|---|
+| `--config <path>` | Path to `tarsail.yml` |
+| `--identity-file <path>` | SSH private key file to pass to `ssh` and `scp` |
+| `--ssh-key <path>` | Alias for `--identity-file` |
+| `--ask-password` | Prompt once for the remote user's SSH password |
+| `--verbose` | Show verbose command output where available |
+| `--yes` | Answer yes to confirmation prompts |
 
 ---
 
@@ -505,6 +534,9 @@ Tarsail does not install Docker for you in Phase 0.
 ## Security Notes
 
 Tarsail uses SSH to connect to your server.
+By default, Tarsail uses your normal `ssh` and `scp` configuration. You can pass
+`--identity-file` for a specific private key, or `--ask-password` to enter the
+remote user's password once for the current command.
 
 Phase 0 does not:
 

@@ -4,8 +4,11 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"os"
 	"regexp"
 	"strings"
+
+	"golang.org/x/term"
 )
 
 var secretPatterns = []struct {
@@ -61,4 +64,22 @@ func PromptYesNo(in io.Reader, out io.Writer, prompt string) (bool, error) {
 	}
 	answer = strings.TrimSpace(strings.ToLower(answer))
 	return answer == "y" || answer == "yes", nil
+}
+
+func PromptPassword(in io.Reader, out io.Writer, prompt string) (string, error) {
+	fmt.Fprint(out, prompt)
+	if file, ok := in.(*os.File); ok && term.IsTerminal(int(file.Fd())) {
+		password, err := term.ReadPassword(int(file.Fd()))
+		fmt.Fprintln(out)
+		if err != nil {
+			return "", err
+		}
+		return strings.TrimRight(string(password), "\r\n"), nil
+	}
+	reader := bufio.NewReader(in)
+	password, err := reader.ReadString('\n')
+	if err != nil && err != io.EOF {
+		return "", err
+	}
+	return strings.TrimRight(password, "\r\n"), nil
 }

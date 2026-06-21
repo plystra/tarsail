@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/plystra/tarsail/internal/bundle"
@@ -20,12 +21,15 @@ import (
 )
 
 type app struct {
-	stdin      io.Reader
-	stdout     io.Writer
-	stderr     io.Writer
-	configPath string
-	verbose    bool
-	yes        bool
+	stdin        io.Reader
+	stdout       io.Writer
+	stderr       io.Writer
+	configPath   string
+	identityFile string
+	askPassword  bool
+	sshPassword  string
+	verbose      bool
+	yes          bool
 }
 
 func main() {
@@ -44,6 +48,9 @@ func (a *app) run(ctx context.Context, args []string) error {
 	global := flag.NewFlagSet("tarsail", flag.ContinueOnError)
 	global.SetOutput(a.stderr)
 	global.StringVar(&a.configPath, "config", config.DefaultFile, "path to tarsail.yml")
+	global.StringVar(&a.identityFile, "identity-file", "", "SSH private key file for remote access")
+	global.StringVar(&a.identityFile, "ssh-key", "", "alias for --identity-file")
+	global.BoolVar(&a.askPassword, "ask-password", false, "prompt once for the remote user's SSH password")
 	global.BoolVar(&a.verbose, "verbose", false, "show verbose command output where available")
 	global.BoolVar(&a.yes, "yes", false, "answer yes to confirmation prompts")
 	global.Usage = a.printUsage
@@ -89,7 +96,7 @@ func (a *app) printUsage() {
 	fmt.Fprintln(a.stdout, `Tarsail
 
 Usage:
-  tarsail [--config tarsail.yml] [--verbose] [--yes] <command>
+  tarsail [--config tarsail.yml] [--identity-file ~/.ssh/id_ed25519] [--ask-password] [--verbose] [--yes] <command>
 
 Commands:
   init       Create a minimal tarsail.yml
@@ -136,16 +143,64 @@ func (a *app) dockerRunnerForRelease(project *config.Project, releaseID string) 
 	}
 }
 
-func (a *app) remoteClient(project *config.Project) remote.Client {
+func (a *app) remoteClient(project *config.Project) (remote.Client, error) {
+	if a.identityFile != "" && a.askPassword {
+		return remote.Client{}, fmt.Errorf("[cli:auth] --identity-file and --ask-password cannot be used together.")
+	}
+	auth := remote.Auth{IdentityFile: a.identityFile}
+	if auth.IdentityFile != "" {
+		identityFile, err := resolveIdentityFile(auth.IdentityFile)
+		if err != nil {
+			return remote.Client{}, err
+		}
+		auth.IdentityFile = identityFile
+	}
+	if a.askPassword && a.sshPassword == "" {
+		password, err := ui.PromptPassword(a.stdin, a.stdout, fmt.Sprintf("SSH password for %s@%s: ", project.Target.User, project.Target.Host))
+		if err != nil {
+			return remote.Client{}, err
+		}
+		if password == "" {
+			return remote.Client{}, fmt.Errorf("[cli:auth] SSH password cannot be empty.")
+		}
+		a.sshPassword = password
+	}
+	auth.Password = a.sshPassword
 	return remote.Client{
 		Target:         project.Target,
 		Project:        project.Project,
 		ComposeEnvFile: project.ComposeEnvFileTarget(),
 		Secrets:        project.Secrets,
+		Auth:           auth,
 		Stdout:         a.stdout,
 		Stderr:         a.stderr,
 		Verbose:        a.verbose,
+	}, nil
+}
+
+func resolveIdentityFile(value string) (string, error) {
+	if strings.HasPrefix(value, "~/") || strings.HasPrefix(value, "~\\") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("[cli:auth] Could not resolve home directory for --identity-file: %w", err)
+		}
+		value = filepath.Join(home, value[2:])
 	}
+	absPath, err := filepath.Abs(value)
+	if err != nil {
+		return "", fmt.Errorf("[cli:auth] Could not resolve --identity-file: %w", err)
+	}
+	info, err := os.Stat(absPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("[cli:auth] SSH identity file not found: %s", absPath)
+		}
+		return "", fmt.Errorf("[cli:auth] Could not inspect SSH identity file: %w", err)
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("[cli:auth] SSH identity file points to a directory: %s", absPath)
+	}
+	return absPath, nil
 }
 
 func (a *app) cmdDoctor(ctx context.Context) error {
@@ -194,7 +249,10 @@ func (a *app) cmdDoctor(ctx context.Context) error {
 
 	fmt.Fprintln(a.stdout)
 	fmt.Fprintln(a.stdout, "Remote:")
-	client := a.remoteClient(project)
+	client, err := a.remoteClient(project)
+	if err != nil {
+		return err
+	}
 	if err := client.CheckSSH(ctx); err != nil {
 		ui.Fail(a.stdout, fmt.Sprintf("SSH connected: %s@%s:%d", project.Target.User, project.Target.Host, project.Target.Port))
 		fmt.Fprintln(a.stderr, err)
@@ -255,7 +313,10 @@ func (a *app) cmdDeploy(ctx context.Context) error {
 	fmt.Fprintln(a.stdout)
 
 	runner := a.dockerRunnerForRelease(project, releaseID)
-	client := a.remoteClient(project)
+	client, err := a.remoteClient(project)
+	if err != nil {
+		return err
+	}
 
 	ui.Step(a.stdout, 1, 8, "Checking local environment")
 	images, err := a.checkLocalForDeploy(ctx, project, runner)
@@ -377,7 +438,11 @@ func (a *app) cmdStatus(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return a.remoteClient(project).Status(ctx)
+	client, err := a.remoteClient(project)
+	if err != nil {
+		return err
+	}
+	return client.Status(ctx)
 }
 
 func (a *app) cmdLogs(ctx context.Context, args []string) error {
@@ -406,7 +471,11 @@ func (a *app) cmdLogs(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return a.remoteClient(project).Logs(ctx, service, *tail, *follow)
+	client, err := a.remoteClient(project)
+	if err != nil {
+		return err
+	}
+	return client.Logs(ctx, service, *tail, *follow)
 }
 
 func validateServiceArg(service string) error {
@@ -427,7 +496,10 @@ func (a *app) cmdRollback(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	client := a.remoteClient(project)
+	client, err := a.remoteClient(project)
+	if err != nil {
+		return err
+	}
 	releases, err := client.ListReleases(ctx)
 	if err != nil {
 		return err
@@ -466,7 +538,10 @@ func (a *app) cmdPrune(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	client := a.remoteClient(project)
+	client, err := a.remoteClient(project)
+	if err != nil {
+		return err
+	}
 	releases, err := client.ListReleases(ctx)
 	if err != nil {
 		return err
