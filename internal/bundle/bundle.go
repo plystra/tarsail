@@ -14,7 +14,6 @@ import (
 
 	"github.com/plystra/tarsail/internal/compose"
 	"github.com/plystra/tarsail/internal/config"
-	localdocker "github.com/plystra/tarsail/internal/docker"
 )
 
 type Manifest struct {
@@ -25,6 +24,7 @@ type Manifest struct {
 	CreatedBy     string          `json:"created_by"`
 	ComposeFile   string          `json:"compose_file"`
 	Images        []ManifestImage `json:"images"`
+	Files         []ManifestFile  `json:"files,omitempty"`
 }
 
 type ManifestImage struct {
@@ -33,12 +33,21 @@ type ManifestImage struct {
 	File    string `json:"file"`
 }
 
+type ManifestFile struct {
+	Source string `json:"source"`
+	Target string `json:"target"`
+}
+
 type Result struct {
 	Path     string
 	Manifest Manifest
 }
 
-func Create(ctx context.Context, project *config.Project, releaseID string, createdAt time.Time, images []compose.ServiceImage, runner localdocker.Runner) (Result, error) {
+type ImageSaver interface {
+	ImageSave(ctx context.Context, image, outputPath string) error
+}
+
+func Create(ctx context.Context, project *config.Project, releaseID string, createdAt time.Time, images []compose.ServiceImage, runner ImageSaver) (Result, error) {
 	workspace, err := os.MkdirTemp("", "tarsail-bundle-*")
 	if err != nil {
 		return Result{}, fmt.Errorf("[bundle:create] Could not create temporary bundle workspace: %w", err)
@@ -73,6 +82,19 @@ func Create(ctx context.Context, project *config.Project, releaseID string, crea
 			Service: image.Service,
 			Image:   image.Image,
 			File:    image.File,
+		})
+	}
+	for _, managedFile := range project.Files {
+		target := filepath.ToSlash(managedFile.Target)
+		if err := validateRelativeBundlePath(target); err != nil {
+			return Result{}, err
+		}
+		if err := copyManagedPath(project.LocalPath(managedFile.Source), filepath.Join(workspace, filepath.FromSlash(target))); err != nil {
+			return Result{}, err
+		}
+		manifest.Files = append(manifest.Files, ManifestFile{
+			Source: managedFile.Source,
+			Target: target,
 		})
 	}
 
@@ -111,6 +133,14 @@ func ValidateManifest(manifest Manifest) error {
 			return err
 		}
 	}
+	for _, file := range manifest.Files {
+		if file.Source == "" || file.Target == "" {
+			return fmt.Errorf("[bundle:manifest] Manifest file entry is missing source or target.")
+		}
+		if err := validateRelativeBundlePath(file.Target); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -133,6 +163,9 @@ func copyFile(src, dst string) error {
 	}
 	defer in.Close()
 
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return fmt.Errorf("[bundle:create] Could not create destination directory: %w", err)
+	}
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return fmt.Errorf("[bundle:create] Could not create bundled Compose file: %w", err)
@@ -143,6 +176,51 @@ func copyFile(src, dst string) error {
 		return fmt.Errorf("[bundle:create] Could not copy Compose file: %w", err)
 	}
 	return nil
+}
+
+func copyManagedPath(src, dst string) error {
+	info, err := os.Lstat(src)
+	if err != nil {
+		return fmt.Errorf("[bundle:files] Could not inspect managed file source: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("[bundle:files] Managed file source must not be a symlink: %s", src)
+	}
+	if info.IsDir() {
+		return copyDirectory(src, dst)
+	}
+	return copyFile(src, dst)
+}
+
+func copyDirectory(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return os.MkdirAll(dst, 0o755)
+		}
+		rel = filepath.ToSlash(rel)
+		if err := validateRelativeBundlePath(rel); err != nil {
+			return err
+		}
+		target := filepath.Join(dst, filepath.FromSlash(rel))
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("[bundle:files] Managed file directories must not contain symlinks: %s", path)
+		}
+		if entry.IsDir() {
+			return os.MkdirAll(target, info.Mode().Perm())
+		}
+		return copyFile(path, target)
+	})
 }
 
 func archiveDirectory(srcDir, dstPath string) error {

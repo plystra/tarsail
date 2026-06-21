@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -16,6 +17,7 @@ type Runner struct {
 	Stdout  io.Writer
 	Stderr  io.Writer
 	Verbose bool
+	Env     []string
 }
 
 type CommandError struct {
@@ -51,6 +53,7 @@ func CheckDockerCommand() error {
 func (r Runner) Capture(ctx context.Context, area string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Dir = r.Dir
+	cmd.Env = append(os.Environ(), r.Env...)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -65,11 +68,12 @@ func (r Runner) Capture(ctx context.Context, area string, args ...string) (strin
 func (r Runner) Stream(ctx context.Context, area string, args ...string) error {
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Dir = r.Dir
+	cmd.Env = append(os.Environ(), r.Env...)
 	if r.Stdout != nil {
-		cmd.Stdout = r.Stdout
+		cmd.Stdout = ui.RedactingWriter{Writer: r.Stdout}
 	}
 	if r.Stderr != nil {
-		cmd.Stderr = r.Stderr
+		cmd.Stderr = ui.RedactingWriter{Writer: r.Stderr}
 	}
 	if err := cmd.Run(); err != nil {
 		return commandError(area, args, "", err)
@@ -118,12 +122,14 @@ func (r Runner) DockerPS(ctx context.Context) error {
 	return err
 }
 
-func (r Runner) ComposeConfig(ctx context.Context, composeFile, project string) (string, error) {
-	return r.Capture(ctx, "compose:config", "compose", "-p", project, "-f", composeFile, "config")
+func (r Runner) ComposeConfig(ctx context.Context, composeFile, project, envFile string) (string, error) {
+	args := composeArgs(composeFile, project, envFile, "config")
+	return r.Capture(ctx, "compose:config", args...)
 }
 
-func (r Runner) ComposeBuild(ctx context.Context, composeFile, project string) error {
-	return r.Stream(ctx, "compose:build", "compose", "-p", project, "-f", composeFile, "build")
+func (r Runner) ComposeBuild(ctx context.Context, composeFile, project, envFile string) error {
+	args := composeArgs(composeFile, project, envFile, "build")
+	return r.Stream(ctx, "compose:build", args...)
 }
 
 func (r Runner) ImageExists(ctx context.Context, image string) error {
@@ -139,4 +145,13 @@ func (r Runner) ImageSave(ctx context.Context, image, outputPath string) error {
 		return fmt.Errorf("[docker:save] Could not save image %s.\n\nDetails:\n  %w", image, err)
 	}
 	return nil
+}
+
+func composeArgs(composeFile, project, envFile, command string) []string {
+	args := []string{"compose", "-p", project}
+	if envFile != "" {
+		args = append(args, "--env-file", envFile)
+	}
+	args = append(args, "-f", composeFile, command)
+	return args
 }

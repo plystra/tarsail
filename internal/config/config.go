@@ -20,10 +20,12 @@ const (
 )
 
 type File struct {
-	Project string  `yaml:"project"`
-	Target  Target  `yaml:"target"`
-	Compose Compose `yaml:"compose"`
-	Deploy  Deploy  `yaml:"deploy"`
+	Project string        `yaml:"project"`
+	Target  Target        `yaml:"target"`
+	Compose Compose       `yaml:"compose"`
+	Deploy  Deploy        `yaml:"deploy"`
+	Files   []ManagedFile `yaml:"files"`
+	Secrets []SecretFile  `yaml:"secrets"`
 }
 
 type Target struct {
@@ -35,7 +37,8 @@ type Target struct {
 }
 
 type Compose struct {
-	File string `yaml:"file"`
+	File    string      `yaml:"file"`
+	EnvFile *SecretFile `yaml:"env_file"`
 }
 
 type Deploy struct {
@@ -54,13 +57,27 @@ var (
 	targetHostRe  = regexp.MustCompile(`^[A-Za-z0-9.-]+$`)
 	targetUserRe  = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]{0,63}$`)
 	targetPathRe  = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)
+	fileModeRe    = regexp.MustCompile(`^0?[0-7]{3}$`)
 )
+
+type ManagedFile struct {
+	Source string `yaml:"source"`
+	Target string `yaml:"target"`
+}
+
+type SecretFile struct {
+	Source string `yaml:"source"`
+	Target string `yaml:"target"`
+	Mode   string `yaml:"mode"`
+}
 
 var supportedTopLevelKeys = map[string]struct{}{
 	"project": {},
 	"target":  {},
 	"compose": {},
 	"deploy":  {},
+	"files":   {},
+	"secrets": {},
 }
 
 var unsupportedFutureTopLevelKeys = map[string]struct{}{
@@ -75,7 +92,6 @@ var unsupportedFutureTopLevelKeys = map[string]struct{}{
 	"plugins":       {},
 	"registries":    {},
 	"registry":      {},
-	"secrets":       {},
 	"servers":       {},
 	"swarm":         {},
 	"targets":       {},
@@ -132,6 +148,19 @@ func applyDefaults(file *File) {
 	if file.Deploy.KeepReleases == 0 {
 		file.Deploy.KeepReleases = DefaultKeepReleases
 	}
+	if file.Compose.EnvFile != nil {
+		if file.Compose.EnvFile.Target == "" {
+			file.Compose.EnvFile.Target = "shared/.env"
+		}
+		if file.Compose.EnvFile.Mode == "" {
+			file.Compose.EnvFile.Mode = "600"
+		}
+	}
+	for i := range file.Secrets {
+		if file.Secrets[i].Mode == "" {
+			file.Secrets[i].Mode = "600"
+		}
+	}
 }
 
 func validateTopLevelKeys(data []byte) error {
@@ -154,13 +183,13 @@ func validateTopLevelKeys(data []byte) error {
 			continue
 		}
 		if _, future := unsupportedFutureTopLevelKeys[key]; future {
-			return fmt.Errorf("[config:scope] Unsupported Phase 0 config section: %s\n\nWhy it matters:\n  Phase 0 supports exactly one target and no CI, registry, secrets, Kubernetes, or plugin sections.\n\nHow to fix:\n  Remove the %q section from tarsail.yml.", key, key)
+			return fmt.Errorf("[config:scope] Unsupported Phase 0 config section: %s\n\nWhy it matters:\n  Phase 0 supports exactly one target and no CI, registry, Kubernetes, or plugin sections.\n\nHow to fix:\n  Remove the %q section from tarsail.yml.", key, key)
 		}
 		unknown = append(unknown, key)
 	}
 	if len(unknown) > 0 {
 		sort.Strings(unknown)
-		return fmt.Errorf("[config:parse] Unknown top-level config key: %s\n\nHow to fix:\n  Supported Phase 0 keys are project, target, compose, and deploy.", strings.Join(unknown, ", "))
+		return fmt.Errorf("[config:parse] Unknown top-level config key: %s\n\nHow to fix:\n  Supported Phase 0 keys are project, target, compose, deploy, files, and secrets.", strings.Join(unknown, ", "))
 	}
 	return nil
 }
@@ -173,6 +202,12 @@ func (p *Project) Validate() error {
 		return err
 	}
 	if err := ValidateComposeFile(p.Root, p.Compose.File); err != nil {
+		return err
+	}
+	if err := p.validateManagedFiles(); err != nil {
+		return err
+	}
+	if err := p.validateSecrets(); err != nil {
 		return err
 	}
 	if p.Deploy.KeepReleases < 1 || p.Deploy.KeepReleases > 20 {
@@ -263,6 +298,141 @@ func ValidateComposeFile(root, composeFile string) error {
 	return nil
 }
 
+func (p *Project) validateManagedFiles() error {
+	for index, file := range p.Files {
+		if err := ValidateLocalSourcePath(file.Source); err != nil {
+			return fmt.Errorf("[config:files] Invalid files[%d].source: %w", index, err)
+		}
+		if err := ValidateReleaseTargetPath(file.Target); err != nil {
+			return fmt.Errorf("[config:files] Invalid files[%d].target: %w", index, err)
+		}
+		if err := ensureLocalSourceExists(p.Root, file.Source); err != nil {
+			return fmt.Errorf("[config:files] files[%d].source is not available: %w", index, err)
+		}
+	}
+	return nil
+}
+
+func (p *Project) validateSecrets() error {
+	if p.Compose.EnvFile != nil {
+		if err := ValidateSharedTargetPath(p.Compose.EnvFile.Target); err != nil {
+			return fmt.Errorf("[config:compose] Invalid compose.env_file.target: %w", err)
+		}
+		if err := ValidateSecretMode(p.Compose.EnvFile.Mode); err != nil {
+			return fmt.Errorf("[config:compose] Invalid compose.env_file.mode: %w", err)
+		}
+		if p.Compose.EnvFile.Source != "" {
+			if err := ValidateLocalSourcePath(p.Compose.EnvFile.Source); err != nil {
+				return fmt.Errorf("[config:compose] Invalid compose.env_file.source: %w", err)
+			}
+			if err := ensureLocalSourceExists(p.Root, p.Compose.EnvFile.Source); err != nil {
+				return fmt.Errorf("[config:compose] compose.env_file.source is not available: %w", err)
+			}
+		}
+	}
+	for index, secret := range p.Secrets {
+		if secret.Source == "" {
+			return fmt.Errorf("[config:secrets] secrets[%d].source is required.\n\nHow to fix:\n  Set source to a local ignored file such as .deploy/prod.env.", index)
+		}
+		if err := ValidateLocalSourcePath(secret.Source); err != nil {
+			return fmt.Errorf("[config:secrets] Invalid secrets[%d].source: %w", index, err)
+		}
+		if err := ValidateSharedTargetPath(secret.Target); err != nil {
+			return fmt.Errorf("[config:secrets] Invalid secrets[%d].target: %w", index, err)
+		}
+		if err := ValidateSecretMode(secret.Mode); err != nil {
+			return fmt.Errorf("[config:secrets] Invalid secrets[%d].mode: %w", index, err)
+		}
+		if err := ensureLocalSourceExists(p.Root, secret.Source); err != nil {
+			return fmt.Errorf("[config:secrets] secrets[%d].source is not available: %w", index, err)
+		}
+	}
+	return nil
+}
+
+func ValidateLocalSourcePath(value string) error {
+	if value == "" {
+		return fmt.Errorf("source path is required")
+	}
+	if filepath.IsAbs(value) || path.IsAbs(value) {
+		return fmt.Errorf("source path must be relative to the project root")
+	}
+	if strings.Contains(value, "\\") {
+		return fmt.Errorf("source path must use forward slashes, not backslashes")
+	}
+	if hasUnsafePathComponent(value) {
+		return fmt.Errorf("source path must not contain '..' or empty path components")
+	}
+	if strings.ContainsAny(value, "\x00\n\r\t") {
+		return fmt.Errorf("source path contains unsupported control characters")
+	}
+	return nil
+}
+
+func ValidateReleaseTargetPath(value string) error {
+	if err := validateRelativeManagedPath(value); err != nil {
+		return err
+	}
+	if value == "files" || !strings.HasPrefix(value, "files/") {
+		return fmt.Errorf("release file targets must be under files/")
+	}
+	return nil
+}
+
+func ValidateSharedTargetPath(value string) error {
+	if err := validateRelativeManagedPath(value); err != nil {
+		return err
+	}
+	if value == "shared" || !strings.HasPrefix(value, "shared/") {
+		return fmt.Errorf("secret targets must be under shared/")
+	}
+	return nil
+}
+
+func validateRelativeManagedPath(value string) error {
+	if value == "" {
+		return fmt.Errorf("target path is required")
+	}
+	if filepath.IsAbs(value) || path.IsAbs(value) {
+		return fmt.Errorf("target path must be relative")
+	}
+	if strings.Contains(value, "\\") {
+		return fmt.Errorf("target path must use forward slashes, not backslashes")
+	}
+	if hasUnsafePathComponent(value) {
+		return fmt.Errorf("target path must not contain '..' or empty path components")
+	}
+	if strings.ContainsAny(value, "\x00;&|$><`'\"(){}[]*?~!\n\r\t ") {
+		return fmt.Errorf("target path contains unsupported characters")
+	}
+	switch value {
+	case "manifest.json", "compose.yaml", "images":
+		return fmt.Errorf("target path uses a reserved release name")
+	}
+	if strings.HasPrefix(value, "images/") {
+		return fmt.Errorf("target path must not be under reserved images/")
+	}
+	return nil
+}
+
+func ValidateSecretMode(mode string) error {
+	if !fileModeRe.MatchString(mode) {
+		return fmt.Errorf("mode must be an octal permission such as 600 or 0644")
+	}
+	return nil
+}
+
+func ensureLocalSourceExists(root, source string) error {
+	fullPath := filepath.Join(root, filepath.FromSlash(source))
+	if _, err := os.Lstat(fullPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("%s", source)
+		}
+		return err
+	}
+	return nil
+}
+
 func hasUnsafePathComponent(value string) bool {
 	parts := strings.Split(value, "/")
 	for _, part := range parts {
@@ -275,4 +445,50 @@ func hasUnsafePathComponent(value string) bool {
 
 func (p *Project) ComposePath() string {
 	return filepath.Join(p.Root, filepath.FromSlash(p.Compose.File))
+}
+
+func (p *Project) LocalPath(source string) string {
+	return filepath.Join(p.Root, filepath.FromSlash(source))
+}
+
+func (p *Project) ComposeEnvFileSourcePath() string {
+	if p.Compose.EnvFile == nil || p.Compose.EnvFile.Source == "" {
+		return ""
+	}
+	return p.LocalPath(p.Compose.EnvFile.Source)
+}
+
+func (p *Project) ComposeEnvFileTarget() string {
+	if p.Compose.EnvFile == nil {
+		return ""
+	}
+	return p.Compose.EnvFile.Target
+}
+
+func (p *Project) SecretUploads() []SecretFile {
+	var uploads []SecretFile
+	if p.Compose.EnvFile != nil && p.Compose.EnvFile.Source != "" {
+		uploads = append(uploads, *p.Compose.EnvFile)
+	}
+	uploads = append(uploads, p.Secrets...)
+	return uploads
+}
+
+func (p *Project) RequiredSharedTargets() []string {
+	var targets []string
+	if p.Compose.EnvFile != nil && p.Compose.EnvFile.Source == "" {
+		targets = append(targets, p.Compose.EnvFile.Target)
+	}
+	return targets
+}
+
+func (p *Project) RuntimeSharedTargets() []string {
+	var targets []string
+	if p.Compose.EnvFile != nil {
+		targets = append(targets, p.Compose.EnvFile.Target)
+	}
+	for _, secret := range p.Secrets {
+		targets = append(targets, secret.Target)
+	}
+	return targets
 }

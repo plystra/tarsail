@@ -121,6 +121,8 @@ A bundle contains:
 ```text
 manifest.json
 compose.yaml
+files/
+  web-dist/
 images/
   api.tar
   web.tar
@@ -135,6 +137,9 @@ Then Tarsail uploads the bundle to your server and applies it:
     20260618-143012-a7f3/
       manifest.json
       compose.yaml
+      shared -> ../../shared
+      files/
+        web-dist/
       images/
         api.tar
         web.tar
@@ -147,7 +152,7 @@ On the server, Tarsail runs:
 ```bash
 docker load -i images/api.tar
 docker load -i images/web.tar
-docker compose up -d
+docker compose --env-file current/.tarsail.env -f current/compose.yaml up -d
 ```
 
 Your target server does not need to pull your application images from a registry during deployment.
@@ -192,7 +197,7 @@ services:
 
   web:
     build: ./web
-    image: my-app-web:local
+    image: my-app-web:${TARSAIL_RELEASE_ID:-local}
 ```
 
 Not supported in Phase 0:
@@ -204,6 +209,9 @@ services:
 ```
 
 Tarsail needs stable image tags so it can save, load, and run the correct images.
+During `deploy`, Tarsail provides `TARSAIL_RELEASE_ID` to local and remote
+Docker Compose commands, so image tags can follow the release ID without manual
+editing.
 
 ---
 
@@ -233,9 +241,21 @@ target:
 
 compose:
   file: compose.yaml
+  env_file:
+    source: .deploy/prod.env
+    target: shared/.env
 
 deploy:
   keep_releases: 3
+
+files:
+  - source: dist
+    target: files/web-dist
+
+secrets:
+  - source: .deploy/htpasswd
+    target: shared/auth/htpasswd
+    mode: 600
 ```
 
 For documentation examples, use placeholder hosts such as `example.com` or documentation-only IP ranges such as `192.0.2.10`. Do not commit real server addresses, real domains, credentials, or private deployment paths to public examples.
@@ -412,6 +432,33 @@ Phase 0 supports exactly one target.
 
 Path to the Docker Compose file relative to the project root.
 
+### `compose.env_file`
+
+Optional env file used by remote Docker Compose.
+
+If `source` is set, Tarsail uploads that local file over SSH/SCP during deploy.
+If `source` is omitted, the file must already exist on the server under
+`shared/`.
+
+Tarsail never prints env file contents.
+
+### `files`
+
+Optional explicit non-secret files or directories to copy into each release
+under `files/`.
+
+Use this for static assets, Nginx config, and other release-owned files that
+should roll back with the Compose file and images.
+
+### `secrets`
+
+Optional explicit secret files to upload over SSH/SCP into the remote `shared/`
+directory.
+
+Secrets are not stored in the release bundle and do not roll back with releases.
+Tarsail does not generate, rotate, back up, or manage secrets beyond copying
+the configured files and applying the configured file mode.
+
 ### `deploy.keep_releases`
 
 Number of releases to keep when pruning.
@@ -465,10 +512,12 @@ Phase 0 does not:
 - store private key contents
 - upload private keys
 - manage server users
-- manage secrets
+- generate, rotate, encrypt, back up, or validate secrets
 - automatically bundle `.env` files
+- automatically discover or collect secrets
 
-You are responsible for managing production secrets and environment files.
+You are responsible for creating and maintaining production secrets and
+environment files. Tarsail only transfers explicit files that you configure.
 
 Tarsail intentionally avoids becoming a secret management system.
 

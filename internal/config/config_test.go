@@ -12,6 +12,15 @@ func TestLoadValidConfig(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte("services: {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Mkdir(filepath.Join(dir, "deploy"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "deploy", "nginx.conf"), []byte("server {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "deploy", "prod.env"), []byte("TOKEN=value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	configPath := filepath.Join(dir, "tarsail.yml")
 	if err := os.WriteFile(configPath, []byte(`project: my-app
 target:
@@ -22,8 +31,18 @@ target:
   path: /opt/my-app
 compose:
   file: compose.yaml
+  env_file:
+    source: deploy/prod.env
+    target: shared/.env
 deploy:
   keep_releases: 3
+files:
+  - source: deploy/nginx.conf
+    target: files/nginx/default.conf
+secrets:
+  - source: deploy/prod.env
+    target: shared/prod.env
+    mode: 600
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -37,6 +56,15 @@ deploy:
 	}
 	if project.ComposePath() != filepath.Join(dir, "compose.yaml") {
 		t.Fatalf("ComposePath = %q", project.ComposePath())
+	}
+	if project.ComposeEnvFileSourcePath() != filepath.Join(dir, "deploy", "prod.env") {
+		t.Fatalf("ComposeEnvFileSourcePath = %q", project.ComposeEnvFileSourcePath())
+	}
+	if len(project.Files) != 1 || project.Files[0].Target != "files/nginx/default.conf" {
+		t.Fatalf("files not loaded: %#v", project.Files)
+	}
+	if len(project.SecretUploads()) != 2 {
+		t.Fatalf("SecretUploads length = %d", len(project.SecretUploads()))
 	}
 }
 
@@ -92,6 +120,65 @@ func TestValidateComposeFileRejectsTraversal(t *testing.T) {
 	}
 	if err := ValidateComposeFile(dir, "/tmp/compose.yaml"); err == nil {
 		t.Fatal("expected absolute path error")
+	}
+}
+
+func TestLoadRejectsUnsafeManagedPaths(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte("services: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "asset.txt"), []byte("asset\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "tarsail.yml")
+	if err := os.WriteFile(configPath, []byte(`project: my-app
+target:
+  name: prod
+  host: example.com
+  user: deploy
+  path: /opt/my-app
+compose:
+  file: compose.yaml
+files:
+  - source: asset.txt
+    target: ../asset.txt
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(configPath); err == nil {
+		t.Fatal("expected unsafe file target error")
+	}
+}
+
+func TestLoadAllowsRemoteOnlyComposeEnvFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte("services: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "tarsail.yml")
+	if err := os.WriteFile(configPath, []byte(`project: my-app
+target:
+  name: prod
+  host: example.com
+  user: deploy
+  path: /opt/my-app
+compose:
+  file: compose.yaml
+  env_file:
+    target: shared/.env
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	project, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if len(project.RequiredSharedTargets()) != 1 || project.RequiredSharedTargets()[0] != "shared/.env" {
+		t.Fatalf("RequiredSharedTargets = %#v", project.RequiredSharedTargets())
+	}
+	if len(project.SecretUploads()) != 0 {
+		t.Fatalf("SecretUploads = %#v", project.SecretUploads())
 	}
 }
 

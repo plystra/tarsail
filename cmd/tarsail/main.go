@@ -119,21 +119,32 @@ func (a *app) loadProject() (*config.Project, error) {
 }
 
 func (a *app) dockerRunner(project *config.Project) localdocker.Runner {
+	return a.dockerRunnerForRelease(project, "")
+}
+
+func (a *app) dockerRunnerForRelease(project *config.Project, releaseID string) localdocker.Runner {
+	var env []string
+	if releaseID != "" {
+		env = append(env, "TARSAIL_RELEASE_ID="+releaseID)
+	}
 	return localdocker.Runner{
 		Dir:     project.Root,
 		Stdout:  a.stdout,
 		Stderr:  a.stderr,
 		Verbose: a.verbose,
+		Env:     env,
 	}
 }
 
 func (a *app) remoteClient(project *config.Project) remote.Client {
 	return remote.Client{
-		Target:  project.Target,
-		Project: project.Project,
-		Stdout:  a.stdout,
-		Stderr:  a.stderr,
-		Verbose: a.verbose,
+		Target:         project.Target,
+		Project:        project.Project,
+		ComposeEnvFile: project.ComposeEnvFileTarget(),
+		Secrets:        project.Secrets,
+		Stdout:         a.stdout,
+		Stderr:         a.stderr,
+		Verbose:        a.verbose,
 	}
 }
 
@@ -198,6 +209,13 @@ func (a *app) cmdDoctor(ctx context.Context) error {
 	} else {
 		ui.OK(a.stdout, "target path writable: "+project.Target.Path)
 	}
+	if err := client.CheckSharedFiles(ctx, project.RequiredSharedTargets()); err != nil {
+		ui.Fail(a.stdout, "shared files available")
+		fmt.Fprintln(a.stderr, err)
+		remoteErrs++
+	} else {
+		ui.OK(a.stdout, "shared files available")
+	}
 	if err := client.CheckDocker(ctx); err != nil {
 		ui.Fail(a.stdout, "Docker available")
 		fmt.Fprintln(a.stderr, err)
@@ -236,7 +254,7 @@ func (a *app) cmdDeploy(ctx context.Context) error {
 	fmt.Fprintln(a.stdout, "Release: "+releaseID)
 	fmt.Fprintln(a.stdout)
 
-	runner := a.dockerRunner(project)
+	runner := a.dockerRunnerForRelease(project, releaseID)
 	client := a.remoteClient(project)
 
 	ui.Step(a.stdout, 1, 8, "Checking local environment")
@@ -258,9 +276,15 @@ func (a *app) cmdDeploy(ctx context.Context) error {
 	if err := client.CheckCompose(ctx); err != nil {
 		return err
 	}
+	if err := uploadSecrets(ctx, project, client); err != nil {
+		return err
+	}
+	if err := client.CheckSharedFiles(ctx, project.RuntimeSharedTargets()); err != nil {
+		return err
+	}
 
 	ui.Step(a.stdout, 3, 8, "Building images")
-	if err := runner.ComposeBuild(ctx, project.Compose.File, project.Project); err != nil {
+	if err := runner.ComposeBuild(ctx, project.Compose.File, project.Project, project.ComposeEnvFileSourcePath()); err != nil {
 		return err
 	}
 	images, err = discoverImages(ctx, project, runner, true)
@@ -307,6 +331,15 @@ func (a *app) cmdDeploy(ctx context.Context) error {
 	return nil
 }
 
+func uploadSecrets(ctx context.Context, project *config.Project, client remote.Client) error {
+	for _, secret := range project.SecretUploads() {
+		if err := client.UploadSecret(ctx, project.LocalPath(secret.Source), secret); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (a *app) checkLocalForDeploy(ctx context.Context, project *config.Project, runner localdocker.Runner) ([]compose.ServiceImage, error) {
 	if err := localdocker.CheckDockerCommand(); err != nil {
 		return nil, err
@@ -321,7 +354,7 @@ func (a *app) checkLocalForDeploy(ctx context.Context, project *config.Project, 
 }
 
 func discoverImages(ctx context.Context, project *config.Project, runner localdocker.Runner, requireLocal bool) ([]compose.ServiceImage, error) {
-	output, err := runner.ComposeConfig(ctx, project.Compose.File, project.Project)
+	output, err := runner.ComposeConfig(ctx, project.Compose.File, project.Project, project.ComposeEnvFileSourcePath())
 	if err != nil {
 		return nil, err
 	}

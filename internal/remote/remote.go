@@ -16,11 +16,13 @@ import (
 )
 
 type Client struct {
-	Target  config.Target
-	Project string
-	Stdout  io.Writer
-	Stderr  io.Writer
-	Verbose bool
+	Target         config.Target
+	Project        string
+	ComposeEnvFile string
+	Secrets        []config.SecretFile
+	Stdout         io.Writer
+	Stderr         io.Writer
+	Verbose        bool
 }
 
 func ShellQuote(value string) string {
@@ -59,10 +61,10 @@ func (c Client) Capture(ctx context.Context, area, script string) (string, error
 func (c Client) Stream(ctx context.Context, area, script string) error {
 	cmd := exec.CommandContext(ctx, "ssh", c.sshArgs("sh -c "+ShellQuote(script))...)
 	if c.Stdout != nil {
-		cmd.Stdout = c.Stdout
+		cmd.Stdout = ui.RedactingWriter{Writer: c.Stdout}
 	}
 	if c.Stderr != nil {
-		cmd.Stderr = c.Stderr
+		cmd.Stderr = ui.RedactingWriter{Writer: c.Stderr}
 	}
 	if err := cmd.Run(); err != nil {
 		return c.commandError(area, script, "", "", err)
@@ -103,6 +105,22 @@ test -w incoming`, target, target)
 	return err
 }
 
+func (c Client) CheckSharedFiles(ctx context.Context, targets []string) error {
+	if len(targets) == 0 {
+		return nil
+	}
+	target := ShellQuote(c.Target.Path)
+	var tests []string
+	for _, item := range uniqueStrings(targets) {
+		tests = append(tests, fmt.Sprintf("test -f %s", ShellQuote(item)))
+	}
+	script := fmt.Sprintf(`set -eu
+cd %s
+%s`, target, strings.Join(tests, "\n"))
+	_, err := c.Capture(ctx, "remote:shared", script)
+	return err
+}
+
 func (c Client) CheckDocker(ctx context.Context) error {
 	_, err := c.Capture(ctx, "remote:docker", "command -v docker >/dev/null 2>&1 && docker ps >/dev/null")
 	return err
@@ -130,6 +148,34 @@ func (c Client) Upload(ctx context.Context, localPath, bundleName string) error 
 			detail = err.Error()
 		}
 		return fmt.Errorf("[remote:upload] Could not upload bundle to %s:%s.\n\nDetails:\n  %s", c.address(), remotePath, strings.ReplaceAll(detail, "\n", "\n  "))
+	}
+	return nil
+}
+
+func (c Client) UploadSecret(ctx context.Context, localPath string, secret config.SecretFile) error {
+	remotePath := path.Join(c.Target.Path, secret.Target)
+	remoteDir := path.Dir(remotePath)
+	if _, err := c.Capture(ctx, "remote:secret-dir", "mkdir -p "+ShellQuote(remoteDir)); err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, "scp",
+		"-P", strconv.Itoa(c.Target.Port),
+		"-o", "BatchMode=yes",
+		"-o", "ConnectTimeout=10",
+		localPath,
+		c.scpDestination(remotePath),
+	)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		detail := strings.TrimSpace(ui.Redact(stderr.String()))
+		if detail == "" {
+			detail = err.Error()
+		}
+		return fmt.Errorf("[remote:secret] Could not upload configured secret file to %s:%s.\n\nDetails:\n  %s", c.address(), remotePath, strings.ReplaceAll(detail, "\n", "\n  "))
+	}
+	if _, err := c.Capture(ctx, "remote:secret-mode", "chmod "+secret.Mode+" "+ShellQuote(remotePath)); err != nil {
+		return err
 	}
 	return nil
 }
@@ -169,7 +215,9 @@ done
 mkdir -p "$release_dir"
 tar -xzf "$bundle_path" -C "$release_dir"
 test -f "$release_dir/manifest.json"
-test -f "$release_dir/compose.yaml"`, target, bundleNameQ, releaseIDQ)
+test -f "$release_dir/compose.yaml"
+printf 'TARSAIL_RELEASE_ID=%%s\n' "$release_id" > "$release_dir/.tarsail.env"
+ln -sfn ../../shared "$release_dir/shared"`, target, bundleNameQ, releaseIDQ)
 	_, err := c.Capture(ctx, "remote:extract", script)
 	return err
 }
@@ -219,11 +267,11 @@ ln -sfn "releases/$release_id" current`, target, releaseIDQ)
 func (c Client) ComposeUp(ctx context.Context) error {
 	target := ShellQuote(c.Target.Path)
 	project := ShellQuote(c.Project)
+	args := c.composeCommandArgs("up -d")
 	script := fmt.Sprintf(`set -eu
 cd %s
 test -L current
-cd current
-docker compose -p %s up -d`, target, project)
+docker compose -p %s %s`, target, project, args)
 	return c.Stream(ctx, "remote:compose-up", script)
 }
 
@@ -237,11 +285,11 @@ func (c Client) ComposeUpAndStatus(ctx context.Context) error {
 func (c Client) Status(ctx context.Context) error {
 	target := ShellQuote(c.Target.Path)
 	project := ShellQuote(c.Project)
+	args := c.composeCommandArgs("ps")
 	script := fmt.Sprintf(`set -eu
 cd %s
 test -L current
-cd current
-docker compose -p %s ps`, target, project)
+docker compose -p %s %s`, target, project, args)
 	return c.Stream(ctx, "remote:status", script)
 }
 
@@ -257,11 +305,11 @@ func (c Client) Logs(ctx context.Context, service string, tail int, follow bool)
 	if service != "" {
 		serviceArg = " " + ShellQuote(service)
 	}
+	args := c.composeCommandArgs("logs " + tailArg + followArg + serviceArg)
 	script := fmt.Sprintf(`set -eu
 cd %s
 test -L current
-cd current
-docker compose -p %s logs %s%s%s`, target, project, tailArg, followArg, serviceArg)
+docker compose -p %s %s`, target, project, args)
 	return c.Stream(ctx, "remote:logs", script)
 }
 
@@ -322,6 +370,7 @@ cd %s
 release_id=%s
 test -f "releases/$release_id/manifest.json"
 test -f "releases/$release_id/compose.yaml"
+ln -sfn ../../shared "releases/$release_id/shared"
 cd "releases/$release_id"
 found=0
 for image in images/*.tar; do
@@ -373,4 +422,29 @@ for release_id in %s; do
 done`, target, strings.Join(quotedIDs, " "))
 	_, err := c.Capture(ctx, "remote:prune", script)
 	return err
+}
+
+func (c Client) composeCommandArgs(command string) string {
+	args := "--env-file current/.tarsail.env"
+	if c.ComposeEnvFile != "" {
+		args += " --env-file " + ShellQuote(c.ComposeEnvFile)
+	}
+	args += " -f current/compose.yaml"
+	return args + " " + command
+}
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	var result []string
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
