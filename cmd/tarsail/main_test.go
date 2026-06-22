@@ -107,6 +107,22 @@ func TestVersionFlag(t *testing.T) {
 	}
 }
 
+func TestVersionShortFlag(t *testing.T) {
+	var stdout bytes.Buffer
+	application := app{
+		stdin:  &bytes.Buffer{},
+		stdout: &stdout,
+		stderr: &bytes.Buffer{},
+	}
+
+	if err := application.run(t.Context(), []string{"-v"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "tarsail dev" {
+		t.Fatalf("version output = %q", got)
+	}
+}
+
 func testProject(t *testing.T) *config.Project {
 	t.Helper()
 	return &config.Project{

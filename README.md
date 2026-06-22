@@ -431,7 +431,7 @@ Global options:
 | `--ask-password` | Prompt once for the remote user's SSH password |
 | `--verbose` | Show verbose command output where available |
 | `--yes` | Answer yes to confirmation prompts |
-| `--version` | Show Tarsail version and exit |
+| `-v`, `--version` | Show Tarsail version and exit |
 
 ---
 

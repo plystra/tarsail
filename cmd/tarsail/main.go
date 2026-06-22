@@ -61,6 +61,7 @@ func (a *app) run(ctx context.Context, args []string) error {
 	global.BoolVar(&a.verbose, "verbose", false, "show verbose command output where available")
 	global.BoolVar(&a.yes, "yes", false, "answer yes to confirmation prompts")
 	global.BoolVar(&a.showVersion, "version", false, "show Tarsail version")
+	global.BoolVar(&a.showVersion, "v", false, "show Tarsail version")
 	global.Usage = a.printUsage
 
 	if err := global.Parse(args); err != nil {
@@ -109,7 +110,7 @@ func (a *app) printUsage() {
 	fmt.Fprintln(a.stdout, `Tarsail
 
 Usage:
-  tarsail [--config tarsail.yml] [--identity-file ~/.ssh/id_ed25519] [--ask-password] [--verbose] [--yes] [--version] <command>
+  tarsail [--config tarsail.yml] [--identity-file ~/.ssh/id_ed25519] [--ask-password] [--verbose] [--yes] [-v|--version] <command>
 
 Commands:
   init       Create a minimal tarsail.yml
