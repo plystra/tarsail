@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/plystra/tarsail/internal/config"
+	"golang.org/x/crypto/ssh"
 )
 
 func TestShellQuote(t *testing.T) {
@@ -110,4 +111,19 @@ func TestUniqueStrings(t *testing.T) {
 			t.Fatalf("uniqueStrings[%d] = %q, want %q", i, got[i], want[i])
 		}
 	}
+}
+
+func TestIsRetryablePasswordSSHError(t *testing.T) {
+	if !isRetryablePasswordSSHError(assertErr("ssh: handshake failed: EOF")) {
+		t.Fatal("EOF handshake failures should be retried")
+	}
+	if isRetryablePasswordSSHError(&ssh.ServerAuthError{Errors: []error{assertErr("permission denied")}}) {
+		t.Fatal("authentication failures should not be retried")
+	}
+}
+
+type assertErr string
+
+func (e assertErr) Error() string {
+	return string(e)
 }

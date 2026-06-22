@@ -3,6 +3,7 @@ package remote
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -16,6 +17,8 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
+
+const passwordSSHMaxAttempts = 3
 
 func (c Client) passwordCapture(ctx context.Context, area, script string) (string, error) {
 	var stdout bytes.Buffer
@@ -109,6 +112,30 @@ func (c Client) passwordSSHClient(ctx context.Context) (*ssh.Client, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	var lastErr error
+	for attempt := 1; attempt <= passwordSSHMaxAttempts; attempt++ {
+		client, err := c.passwordSSHClientOnce(ctx, hostKeyCallback)
+		if err == nil {
+			return client, nil
+		}
+		lastErr = err
+		if !isRetryablePasswordSSHError(err) || attempt == passwordSSHMaxAttempts {
+			return nil, err
+		}
+		delay := time.Duration(attempt) * 250 * time.Millisecond
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil, lastErr
+}
+
+func (c Client) passwordSSHClientOnce(ctx context.Context, hostKeyCallback ssh.HostKeyCallback) (*ssh.Client, error) {
 	config := &ssh.ClientConfig{
 		User:            c.Target.User,
 		Auth:            []ssh.AuthMethod{ssh.Password(c.Auth.Password)},
@@ -141,9 +168,36 @@ func (c Client) passwordSSHClient(ctx context.Context) (*ssh.Client, error) {
 	}
 	if handshakeErr != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("[remote:ssh] Password authentication failed for %s: %w", c.address(), handshakeErr)
+		return nil, passwordHandshakeError(c.address(), handshakeErr)
 	}
 	return ssh.NewClient(clientConn, chans, reqs), nil
+}
+
+func passwordHandshakeError(address string, err error) error {
+	var authErr *ssh.ServerAuthError
+	if errors.As(err, &authErr) {
+		return fmt.Errorf("[remote:ssh] Password authentication failed for %s: %w", address, err)
+	}
+	return fmt.Errorf("[remote:ssh] SSH handshake failed for %s: %w", address, err)
+}
+
+func isRetryablePasswordSSHError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var authErr *ssh.ServerAuthError
+	if errors.As(err, &authErr) {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "eof") ||
+		strings.Contains(text, "connection reset") ||
+		strings.Contains(text, "connection refused") ||
+		strings.Contains(text, "i/o timeout") ||
+		strings.Contains(text, "connection timed out")
 }
 
 func knownHostsCallback() (ssh.HostKeyCallback, error) {
