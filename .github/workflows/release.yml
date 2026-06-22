@@ -98,25 +98,25 @@ jobs:
       - name: Write release notes
         shell: bash
         run: |
-          cat > release-notes.md <<EOF
-Tarsail ${TARSAIL_TAG}
-
-Prebuilt binaries are attached for:
-
-- Linux amd64 and arm64
-- macOS amd64 and arm64
-- Windows amd64 and arm64
-
-Install or upgrade from the documentation site:
-
-\`\`\`bash
-curl -fsSL https://tarsail.plystra.com/install.sh | sh
-\`\`\`
-
-\`\`\`powershell
-irm https://tarsail.plystra.com/install.ps1 | iex
-\`\`\`
-          EOF
+          {
+            echo "Tarsail ${TARSAIL_TAG}"
+            echo
+            echo "Prebuilt binaries are attached for:"
+            echo
+            echo "- Linux amd64 and arm64"
+            echo "- macOS amd64 and arm64"
+            echo "- Windows amd64 and arm64"
+            echo
+            echo "Install or upgrade from the documentation site:"
+            echo
+            echo '```bash'
+            echo "curl -fsSL https://tarsail.plystra.com/install.sh | sh"
+            echo '```'
+            echo
+            echo '```powershell'
+            echo "irm https://tarsail.plystra.com/install.ps1 | iex"
+            echo '```'
+          } > release-notes.md
 
       - name: Publish GitHub release
         env:
