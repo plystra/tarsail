@@ -75,6 +75,38 @@ func TestRemoteClientResolvesIdentityFile(t *testing.T) {
 	}
 }
 
+func TestVersionCommand(t *testing.T) {
+	var stdout bytes.Buffer
+	application := app{
+		stdin:  &bytes.Buffer{},
+		stdout: &stdout,
+		stderr: &bytes.Buffer{},
+	}
+
+	if err := application.run(t.Context(), []string{"version"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "tarsail dev" {
+		t.Fatalf("version output = %q", got)
+	}
+}
+
+func TestVersionFlag(t *testing.T) {
+	var stdout bytes.Buffer
+	application := app{
+		stdin:  &bytes.Buffer{},
+		stdout: &stdout,
+		stderr: &bytes.Buffer{},
+	}
+
+	if err := application.run(t.Context(), []string{"--version"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "tarsail dev" {
+		t.Fatalf("version output = %q", got)
+	}
+}
+
 func testProject(t *testing.T) *config.Project {
 	t.Helper()
 	return &config.Project{

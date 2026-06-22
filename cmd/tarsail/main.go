@@ -30,7 +30,14 @@ type app struct {
 	sshPassword  string
 	verbose      bool
 	yes          bool
+	showVersion  bool
 }
+
+var (
+	version = "dev"
+	commit  = "unknown"
+	date    = "unknown"
+)
 
 func main() {
 	application := app{
@@ -53,6 +60,7 @@ func (a *app) run(ctx context.Context, args []string) error {
 	global.BoolVar(&a.askPassword, "ask-password", false, "prompt once for the remote user's SSH password")
 	global.BoolVar(&a.verbose, "verbose", false, "show verbose command output where available")
 	global.BoolVar(&a.yes, "yes", false, "answer yes to confirmation prompts")
+	global.BoolVar(&a.showVersion, "version", false, "show Tarsail version")
 	global.Usage = a.printUsage
 
 	if err := global.Parse(args); err != nil {
@@ -60,6 +68,9 @@ func (a *app) run(ctx context.Context, args []string) error {
 			return nil
 		}
 		return err
+	}
+	if a.showVersion {
+		return a.cmdVersion()
 	}
 	rest := global.Args()
 	if len(rest) == 0 {
@@ -84,11 +95,13 @@ func (a *app) run(ctx context.Context, args []string) error {
 		return a.cmdRollback(ctx)
 	case "prune":
 		return a.cmdPrune(ctx, commandArgs)
+	case "version":
+		return a.cmdVersion()
 	case "help", "-h", "--help":
 		a.printUsage()
 		return nil
 	default:
-		return fmt.Errorf("[cli:command] Unknown command: %s\n\nHow to fix:\n  Use one of: init, doctor, deploy, status, logs, rollback, prune.", command)
+		return fmt.Errorf("[cli:command] Unknown command: %s\n\nHow to fix:\n  Use one of: init, doctor, deploy, status, logs, rollback, prune, version.", command)
 	}
 }
 
@@ -96,7 +109,7 @@ func (a *app) printUsage() {
 	fmt.Fprintln(a.stdout, `Tarsail
 
 Usage:
-  tarsail [--config tarsail.yml] [--identity-file ~/.ssh/id_ed25519] [--ask-password] [--verbose] [--yes] <command>
+  tarsail [--config tarsail.yml] [--identity-file ~/.ssh/id_ed25519] [--ask-password] [--verbose] [--yes] [--version] <command>
 
 Commands:
   init       Create a minimal tarsail.yml
@@ -105,7 +118,17 @@ Commands:
   status     Show remote Compose status
   logs       Show remote Compose logs
   rollback   Roll back to the previous release
-  prune      Delete old non-current releases`)
+  prune      Delete old non-current releases
+  version    Show Tarsail version`)
+}
+
+func (a *app) cmdVersion() error {
+	fmt.Fprintln(a.stdout, "tarsail "+version)
+	if a.verbose {
+		fmt.Fprintln(a.stdout, "commit "+commit)
+		fmt.Fprintln(a.stdout, "built "+date)
+	}
+	return nil
 }
 
 func (a *app) cmdInit() error {

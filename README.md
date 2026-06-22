@@ -163,9 +163,29 @@ Your target server does not need to pull your application images from a registry
 
 Tarsail is under early development.
 
-Prebuilt binaries and package manager installation are not available yet.
+Install or upgrade with the hosted installer.
 
-For development builds:
+Windows PowerShell:
+
+```powershell
+irm https://tarsail.plystra.com/install.ps1 | iex
+```
+
+Linux or macOS:
+
+```bash
+curl -fsSL https://tarsail.plystra.com/install.sh | sh
+```
+
+Verify:
+
+```bash
+tarsail version
+```
+
+Release assets are published from GitHub Actions when a `v*` tag is pushed.
+
+For development builds from source:
 
 ```bash
 git clone https://github.com/plystra/tarsail.git
@@ -397,6 +417,7 @@ It does not delete Docker volumes, databases, bind mounts, or files outside the 
 | `tarsail logs` | Show remote Compose logs |
 | `tarsail rollback` | Roll back to the previous release |
 | `tarsail prune` | Delete old non-current releases |
+| `tarsail version` | Show installed Tarsail version |
 
 Global options:
 
@@ -408,6 +429,7 @@ Global options:
 | `--ask-password` | Prompt once for the remote user's SSH password |
 | `--verbose` | Show verbose command output where available |
 | `--yes` | Answer yes to confirmation prompts |
+| `--version` | Show Tarsail version and exit |
 
 ---
 
