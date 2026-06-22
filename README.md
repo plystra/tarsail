@@ -183,7 +183,9 @@ Verify:
 tarsail version
 ```
 
-Release assets are published from GitHub Actions when a `v*` tag is pushed.
+Release assets are published automatically from GitHub Actions when changes are
+pushed to `main`. Each release is tagged with a date plus commit hash, for
+example `20260622-194500-a1b2c3d4e5f6`, and marked as the GitHub latest release.
 
 For development builds from source:
 

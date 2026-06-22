@@ -2,17 +2,16 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
   workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing tag to release, for example v0.1.0
-        required: true
-        type: string
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   release:
@@ -24,19 +23,20 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event.inputs.tag || github.ref }}
 
-      - name: Select release tag
+      - name: Select release version
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            tag="${{ inputs.tag }}"
-          else
-            tag="${GITHUB_REF_NAME}"
-          fi
-          echo "TARSAIL_TAG=$tag" >> "$GITHUB_ENV"
-          echo "Releasing $tag"
+          commit="$(git rev-parse --short=12 HEAD)"
+          commit_date="$(TZ=UTC git show -s --format=%cd --date=format-local:%Y%m%d-%H%M%S HEAD)"
+          built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          version="${commit_date}-${commit}"
+
+          echo "TARSAIL_VERSION=$version" >> "$GITHUB_ENV"
+          echo "TARSAIL_COMMIT=$commit" >> "$GITHUB_ENV"
+          echo "TARSAIL_BUILT_AT=$built_at" >> "$GITHUB_ENV"
+          echo "Releasing $version"
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -53,9 +53,7 @@ jobs:
           set -euo pipefail
           mkdir -p dist build
 
-          commit="$(git rev-parse --short=12 HEAD)"
-          built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          ldflags="-s -w -X main.version=${TARSAIL_TAG} -X main.commit=${commit} -X main.date=${built_at}"
+          ldflags="-s -w -X main.version=${TARSAIL_VERSION} -X main.commit=${TARSAIL_COMMIT} -X main.date=${TARSAIL_BUILT_AT}"
 
           targets=(
             "linux amd64"
@@ -68,7 +66,7 @@ jobs:
 
           for target in "${targets[@]}"; do
             read -r os arch <<< "$target"
-            name="tarsail_${TARSAIL_TAG}_${os}_${arch}"
+            name="tarsail_${TARSAIL_VERSION}_${os}_${arch}"
             out_dir="build/${name}"
             mkdir -p "$out_dir"
 
@@ -99,7 +97,10 @@ jobs:
         shell: bash
         run: |
           {
-            echo "Tarsail ${TARSAIL_TAG}"
+            echo "Tarsail ${TARSAIL_VERSION}"
+            echo
+            echo "Built from commit ${GITHUB_SHA}."
+            echo "Published automatically from ${GITHUB_REF_NAME}."
             echo
             echo "Prebuilt binaries are attached for:"
             echo
@@ -124,10 +125,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if gh release view "$TARSAIL_TAG" >/dev/null 2>&1; then
-            gh release upload "$TARSAIL_TAG" dist/* --clobber
+          if gh release view "$TARSAIL_VERSION" >/dev/null 2>&1; then
+            gh release upload "$TARSAIL_VERSION" dist/* --clobber
+            gh release edit "$TARSAIL_VERSION" \
+              --title "Tarsail ${TARSAIL_VERSION}" \
+              --notes-file release-notes.md \
+              --latest
           else
-            gh release create "$TARSAIL_TAG" dist/* \
-              --title "Tarsail ${TARSAIL_TAG}" \
-              --notes-file release-notes.md
+            gh release create "$TARSAIL_VERSION" dist/* \
+              --title "Tarsail ${TARSAIL_VERSION}" \
+              --notes-file release-notes.md \
+              --target "$GITHUB_SHA" \
+              --latest
           fi
