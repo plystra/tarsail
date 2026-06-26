@@ -267,11 +267,16 @@ compose:
     source: .deploy/prod.env
     target: shared/.env
 
+build:
+  steps:
+    - name: Build web assets
+      run: npm run build:web
+
 deploy:
   keep_releases: 3
 
 files:
-  - source: dist
+  - source: apps/web/dist
     target: files/web-dist
 
 secrets:
@@ -329,15 +334,16 @@ tarsail deploy
 
 Tarsail will:
 
-1. build your Compose images locally
-2. save images into tar files
-3. create a release bundle
-4. upload the bundle to the server
-5. extract the bundle into a new release directory
-6. run `docker load`
-7. activate the new release
-8. run `docker compose up -d`
-9. show remote Compose status
+1. check the local Docker and Compose environment
+2. run configured build steps, if any
+3. check the remote server and upload configured secrets
+4. build your Compose images locally
+5. save images into tar files and create a release bundle
+6. upload and extract the bundle into a new release directory
+7. run `docker load`
+8. activate the new release
+9. run `docker compose up -d`
+10. show remote Compose status
 
 ---
 
@@ -495,6 +501,30 @@ If `source` is omitted, the file must already exist on the server under
 
 Tarsail never prints env file contents.
 
+### `build.steps`
+
+Optional local commands to run before Tarsail creates the release bundle.
+
+Use this for generated release files such as Vite, Astro, Next static export,
+or other static asset output that is later copied through `files`.
+
+Example:
+
+```yaml
+build:
+  steps:
+    - name: Build web dist
+      run: npm run build:web
+
+files:
+  - source: apps/web/dist
+    target: files/web-dist
+```
+
+Build steps run only during `deploy`, before Tarsail contacts the remote server,
+builds Compose images, or creates the bundle. They receive
+`TARSAIL_RELEASE_ID=<release-id>`.
+
 ### `files`
 
 Optional explicit non-secret files or directories to copy into each release
@@ -502,6 +532,9 @@ under `files/`.
 
 Use this for static assets, Nginx config, and other release-owned files that
 should roll back with the Compose file and images.
+
+If a file source is generated, configure `build.steps` to create it. Tarsail
+checks `files` sources after build steps and before uploading a bundle.
 
 ### `secrets`
 

@@ -123,6 +123,52 @@ func TestVersionShortFlag(t *testing.T) {
 	}
 }
 
+func TestRunBuildStepsCreatesManagedFileSource(t *testing.T) {
+	project := testProject(t)
+	project.Build = config.Build{
+		Steps: []config.BuildStep{
+			{Name: "Build generated file", Run: "echo built > dist.txt"},
+		},
+	}
+	project.Files = []config.ManagedFile{
+		{Source: "dist.txt", Target: "files/dist.txt"},
+	}
+	application := app{
+		stdin:  &bytes.Buffer{},
+		stdout: &bytes.Buffer{},
+		stderr: &bytes.Buffer{},
+	}
+
+	if err := application.runBuildSteps(t.Context(), project, "20260618-120000-a111"); err != nil {
+		t.Fatalf("runBuildSteps returned error: %v", err)
+	}
+	if err := checkManagedFilesForDeploy(project); err != nil {
+		t.Fatalf("checkManagedFilesForDeploy returned error: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(project.Root, "dist.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "built") {
+		t.Fatalf("generated file content = %q", data)
+	}
+}
+
+func TestCheckManagedFilesForDeployReportsMissingSource(t *testing.T) {
+	project := testProject(t)
+	project.Files = []config.ManagedFile{
+		{Source: "dist", Target: "files/dist"},
+	}
+
+	err := checkManagedFilesForDeploy(project)
+	if err == nil {
+		t.Fatal("expected missing file source error")
+	}
+	if !strings.Contains(err.Error(), "Release file source is missing after build steps: dist") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func testProject(t *testing.T) *config.Project {
 	t.Helper()
 	return &config.Project{

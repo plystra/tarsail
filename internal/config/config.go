@@ -22,6 +22,7 @@ const (
 type File struct {
 	Project string        `yaml:"project"`
 	Target  Target        `yaml:"target"`
+	Build   Build         `yaml:"build"`
 	Compose Compose       `yaml:"compose"`
 	Deploy  Deploy        `yaml:"deploy"`
 	Files   []ManagedFile `yaml:"files"`
@@ -39,6 +40,16 @@ type Target struct {
 type Compose struct {
 	File    string      `yaml:"file"`
 	EnvFile *SecretFile `yaml:"env_file"`
+}
+
+type Build struct {
+	Steps []BuildStep `yaml:"steps"`
+}
+
+type BuildStep struct {
+	Name string `yaml:"name"`
+	Run  string `yaml:"run"`
+	Dir  string `yaml:"dir"`
 }
 
 type Deploy struct {
@@ -74,6 +85,7 @@ type SecretFile struct {
 var supportedTopLevelKeys = map[string]struct{}{
 	"project": {},
 	"target":  {},
+	"build":   {},
 	"compose": {},
 	"deploy":  {},
 	"files":   {},
@@ -189,7 +201,7 @@ func validateTopLevelKeys(data []byte) error {
 	}
 	if len(unknown) > 0 {
 		sort.Strings(unknown)
-		return fmt.Errorf("[config:parse] Unknown top-level config key: %s\n\nHow to fix:\n  Supported Phase 0 keys are project, target, compose, deploy, files, and secrets.", strings.Join(unknown, ", "))
+		return fmt.Errorf("[config:parse] Unknown top-level config key: %s\n\nHow to fix:\n  Supported Phase 0 keys are project, target, build, compose, deploy, files, and secrets.", strings.Join(unknown, ", "))
 	}
 	return nil
 }
@@ -204,6 +216,9 @@ func (p *Project) Validate() error {
 	if err := ValidateComposeFile(p.Root, p.Compose.File); err != nil {
 		return err
 	}
+	if err := p.validateBuildSteps(); err != nil {
+		return err
+	}
 	if err := p.validateManagedFiles(); err != nil {
 		return err
 	}
@@ -212,6 +227,29 @@ func (p *Project) Validate() error {
 	}
 	if p.Deploy.KeepReleases < 1 || p.Deploy.KeepReleases > 20 {
 		return fmt.Errorf("[config:deploy] deploy.keep_releases must be between 1 and 20.\n\nHow to fix:\n  Set deploy.keep_releases to a small positive number such as 3.")
+	}
+	return nil
+}
+
+func (p *Project) validateBuildSteps() error {
+	for index, step := range p.Build.Steps {
+		if strings.TrimSpace(step.Run) == "" {
+			return fmt.Errorf("[config:build] build.steps[%d].run is required.\n\nHow to fix:\n  Set run to a local command such as \"npm run build\".", index)
+		}
+		if strings.ContainsAny(step.Run, "\x00\n\r") {
+			return fmt.Errorf("[config:build] build.steps[%d].run must be a single-line command.", index)
+		}
+		if strings.ContainsAny(step.Name, "\x00\n\r") {
+			return fmt.Errorf("[config:build] build.steps[%d].name contains unsupported control characters.", index)
+		}
+		if step.Dir != "" {
+			if err := ValidateLocalSourcePath(step.Dir); err != nil {
+				return fmt.Errorf("[config:build] Invalid build.steps[%d].dir: %w", index, err)
+			}
+			if err := ensureLocalDirectoryExists(p.Root, step.Dir); err != nil {
+				return fmt.Errorf("[config:build] build.steps[%d].dir is not available: %w", index, err)
+			}
+		}
 	}
 	return nil
 }
@@ -305,9 +343,6 @@ func (p *Project) validateManagedFiles() error {
 		}
 		if err := ValidateReleaseTargetPath(file.Target); err != nil {
 			return fmt.Errorf("[config:files] Invalid files[%d].target: %w", index, err)
-		}
-		if err := ensureLocalSourceExists(p.Root, file.Source); err != nil {
-			return fmt.Errorf("[config:files] files[%d].source is not available: %w", index, err)
 		}
 	}
 	return nil
@@ -433,6 +468,21 @@ func ensureLocalSourceExists(root, source string) error {
 	return nil
 }
 
+func ensureLocalDirectoryExists(root, source string) error {
+	fullPath := filepath.Join(root, filepath.FromSlash(source))
+	info, err := os.Stat(fullPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("%s", source)
+		}
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", source)
+	}
+	return nil
+}
+
 func hasUnsafePathComponent(value string) bool {
 	parts := strings.Split(value, "/")
 	for _, part := range parts {
@@ -449,6 +499,31 @@ func (p *Project) ComposePath() string {
 
 func (p *Project) LocalPath(source string) string {
 	return filepath.Join(p.Root, filepath.FromSlash(source))
+}
+
+func (p *Project) BuildStepDir(step BuildStep) string {
+	if step.Dir == "" {
+		return p.Root
+	}
+	return p.LocalPath(step.Dir)
+}
+
+func (p *Project) HasBuildSteps() bool {
+	return len(p.Build.Steps) > 0
+}
+
+func (p *Project) MissingManagedFileSources() ([]string, error) {
+	var missing []string
+	for _, file := range p.Files {
+		if _, err := os.Lstat(p.LocalPath(file.Source)); err != nil {
+			if os.IsNotExist(err) {
+				missing = append(missing, file.Source)
+				continue
+			}
+			return nil, fmt.Errorf("[config:files] Could not inspect files source %s: %w", file.Source, err)
+		}
+	}
+	return missing, nil
 }
 
 func (p *Project) ComposeEnvFileSourcePath() string {
